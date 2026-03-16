@@ -9,8 +9,8 @@ import re
 from enum import Enum
 from typing import List, Optional, Dict, Any
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
 

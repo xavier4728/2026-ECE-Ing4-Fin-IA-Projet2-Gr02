@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

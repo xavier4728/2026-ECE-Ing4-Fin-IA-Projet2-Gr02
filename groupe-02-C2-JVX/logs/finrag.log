@@ -1,0 +1,2 @@
+2026-03-16 21:14:02.266 | ERROR    | __main__:main:292 - Erreur: No module named 'langchain.schema'
+2026-03-16 21:18:32.202 | ERROR    | __main__:main:292 - Erreur: No module named 'langchain.schema'

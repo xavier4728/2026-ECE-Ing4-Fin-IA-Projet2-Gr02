@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.ingestion.document_loader import FinancialDocumentLoader, _extract_tickers, _detect_document_type
 from src.ingestion.chunker import IntelligentFinancialChunker, ChunkingStrategy
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 
 class TestFinancialDocumentLoader:

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import List
 
 import pytest
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 # Add project root to path
 ROOT_DIR = Path(__file__).parent.parent
