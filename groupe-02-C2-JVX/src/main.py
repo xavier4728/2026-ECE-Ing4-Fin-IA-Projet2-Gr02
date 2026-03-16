@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FinRAG — Point d'entrée CLI.
-Commandes: ingest, query, evaluate, ui.
+Commandes: ingest, query, evaluate, ui, stats.
 """
 
 from __future__ import annotations
@@ -19,10 +19,22 @@ from src.config import settings
 
 
 def setup_logging():
-    """Configure le logging."""
-    import os
-    log_dir = ROOT_DIR / "logs"
-    log_dir.mkdir(exist_ok=True)
+    """
+    Configure le logging.
+
+    FIX MOYEN : création de tous les répertoires nécessaires au premier lancement.
+    Sans cela, un run sur installation fraîche lève FileNotFoundError.
+    """
+    # Créer tous les répertoires requis au démarrage
+    for dir_path in [
+        ROOT_DIR / "logs",
+        ROOT_DIR / "data" / "chroma_db",
+        ROOT_DIR / "data" / "uploads",
+        ROOT_DIR / "data" / "embedding_cache",
+        ROOT_DIR / "data" / "samples",
+        ROOT_DIR / "docs",
+    ]:
+        dir_path.mkdir(parents=True, exist_ok=True)
 
     logger.remove()
     logger.add(
@@ -31,7 +43,7 @@ def setup_logging():
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{line}</cyan> — <white>{message}</white>",
     )
     logger.add(
-        str(log_dir / "finrag.log"),
+        str(ROOT_DIR / "logs" / "finrag.log"),
         rotation="10 MB",
         retention="7 days",
         level="DEBUG",
@@ -100,7 +112,6 @@ def cmd_ingest(args):
         docs = loader.load(file_path)
         all_docs.extend(docs)
 
-        # Extract tables from PDFs
         if file_path.suffix.lower() == ".pdf":
             extractor = FinancialTableExtractor()
             table_docs = extractor.extract_tables_from_pdf(file_path)
@@ -108,7 +119,6 @@ def cmd_ingest(args):
 
     logger.info(f"{len(all_docs)} documents chargés")
 
-    # Chunk
     chunker = IntelligentFinancialChunker(
         strategy=ChunkingStrategy.HYBRID,
         chunk_size=settings.CHUNK_SIZE,
@@ -117,9 +127,11 @@ def cmd_ingest(args):
     chunks = chunker.chunk_documents(all_docs)
     logger.info(f"{len(chunks)} chunks créés")
 
-    # Index
     system = _build_system()
     added = system["vector_store"].add_documents(chunks)
+
+    # Invalider le cache BM25 après indexation
+    system["retriever"].invalidate_bm25_cache()
 
     stats = system["vector_store"].get_stats()
     logger.success(
@@ -147,10 +159,12 @@ def cmd_query(args):
     print("="*70)
     print(answer.answer)
     print("-"*70)
-    print(f"Confiance: {answer.confidence_score:.0%} | "
-          f"Temps: {answer.processing_time:.1f}s | "
-          f"Tokens: {answer.tokens_used:,} | "
-          f"Sources: {answer.context_docs_count}")
+    print(
+        f"Confiance: {answer.confidence_score:.0%} | "
+        f"Temps: {answer.processing_time:.1f}s | "
+        f"Tokens: {answer.tokens_used:,} | "
+        f"Sources: {answer.context_docs_count}"
+    )
 
     if answer.citations:
         print("\nCitations:")
@@ -170,7 +184,7 @@ def cmd_evaluate(args):
     system = _build_system()
     evaluator = RAGASEvaluator(
         agent=system["agent"],
-        eval_dataset_path=args.dataset if args.dataset else None,
+        eval_dataset_path=args.dataset if hasattr(args, "dataset") and args.dataset else None,
     )
 
     logger.info(f"Démarrage de l'évaluation ({args.max_samples} questions max)...")
@@ -183,11 +197,11 @@ def cmd_evaluate(args):
     print("RAPPORT D'ÉVALUATION RAGAS")
     print("="*70)
     print(f"Échantillons: {report.n_samples}")
-    print(f"Faithfulness:     {report.avg_faithfulness:.3f}")
-    print(f"Answer Relevancy: {report.avg_answer_relevancy:.3f}")
-    print(f"Context Recall:   {report.avg_context_recall:.3f}")
-    print(f"Context Precision:{report.avg_context_precision:.3f}")
-    print(f"Score Global:     {report.overall_score:.3f}")
+    print(f"Faithfulness:      {report.avg_faithfulness:.3f}")
+    print(f"Answer Relevancy:  {report.avg_answer_relevancy:.3f}")
+    print(f"Context Recall:    {report.avg_context_recall:.3f}")
+    print(f"Context Precision: {report.avg_context_precision:.3f}")
+    print(f"Score Global:      {report.overall_score:.3f}")
     print(f"Durée: {report.evaluation_time:.1f}s")
     print("="*70)
     print("Rapport sauvegardé dans docs/evaluation_report.md")
@@ -242,25 +256,19 @@ Exemples :
 
     subparsers = parser.add_subparsers(dest="command", help="Commande à exécuter")
 
-    # ingest
     p_ingest = subparsers.add_parser("ingest", help="Indexer des documents")
     p_ingest.add_argument("--source", required=True, help="Chemin du fichier ou répertoire")
 
-    # query
     p_query = subparsers.add_parser("query", help="Poser une question")
     p_query.add_argument("question", help="Question financière")
     p_query.add_argument("--no-decompose", action="store_true", help="Désactive la décomposition")
 
-    # evaluate
     p_eval = subparsers.add_parser("evaluate", help="Évaluation RAGAS")
     p_eval.add_argument("--max-samples", type=int, default=10, help="Nombre max de questions")
     p_eval.add_argument("--dataset", help="Chemin vers le dataset JSON (optionnel)")
 
-    # ui
-    p_ui = subparsers.add_parser("ui", help="Lancer l'interface Streamlit")
-
-    # stats
-    p_stats = subparsers.add_parser("stats", help="Statistiques du vector store")
+    subparsers.add_parser("ui", help="Lancer l'interface Streamlit")
+    subparsers.add_parser("stats", help="Statistiques du vector store")
 
     args = parser.parse_args()
 

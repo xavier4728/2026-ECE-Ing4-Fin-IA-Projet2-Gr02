@@ -1,9 +1,8 @@
 """Configuration centralisée du système FinRAG via pydantic-settings."""
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from pathlib import Path
-import os
 
 
 class Settings(BaseSettings):
@@ -13,6 +12,14 @@ class Settings(BaseSettings):
     ou le fichier .env à la racine du projet.
     """
 
+    # FIX ÉLEVÉ : utilisation de model_config au lieu de class Config (déprécié en pydantic-settings v2)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",       # ignore les variables d'env inconnues
+    )
+
     # === LLM ===
     OPENAI_API_KEY: str = Field(default="", description="Clé API OpenAI pour les embeddings")
     ANTHROPIC_API_KEY: str = Field(default="", description="Clé API Anthropic pour la génération")
@@ -20,7 +27,7 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = Field(default="text-embedding-3-small", description="Modèle d'embeddings OpenAI")
     FALLBACK_EMBEDDING_MODEL: str = Field(
         default="all-MiniLM-L6-v2",
-        description="Modèle d'embeddings local (fallback sans API OpenAI)"
+        description="Modèle d'embeddings local (fallback sans API OpenAI)",
     )
 
     # === RAG ===
@@ -32,6 +39,10 @@ class Settings(BaseSettings):
     TIME_DECAY_FACTOR: float = Field(default=0.1, description="Facteur de décroissance temporelle")
     BM25_TOP_K: int = Field(default=20, description="Top-k pour BM25 avant fusion")
     DENSE_TOP_K: int = Field(default=20, description="Top-k pour dense retrieval avant fusion")
+
+    # === BM25 ===
+    # FIX ÉLEVÉ : plafond mémoire BM25 pour éviter OOM sur gros corpus
+    BM25_MAX_DOCS: int = Field(default=10_000, description="Nombre max de docs chargés en RAM pour BM25")
 
     # === ChromaDB ===
     CHROMA_PERSIST_DIR: str = Field(default="./data/chroma_db", description="Répertoire de persistance ChromaDB")
@@ -48,11 +59,6 @@ class Settings(BaseSettings):
     # === Logging ===
     LOG_LEVEL: str = Field(default="INFO", description="Niveau de log (DEBUG, INFO, WARNING, ERROR)")
     LOG_FILE: str = Field(default="./logs/finrag.log", description="Fichier de log")
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
 
     @property
     def use_openai_embeddings(self) -> bool:

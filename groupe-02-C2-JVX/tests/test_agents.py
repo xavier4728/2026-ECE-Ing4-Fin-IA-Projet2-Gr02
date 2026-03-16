@@ -30,9 +30,7 @@ class TestFinancialQueryDecomposer:
     def test_simple_query_no_decomposition(self):
         """Test qu'une question simple ne nécessite pas de décomposition."""
         decomposer = FinancialQueryDecomposer()
-        # Simple question
         needs = decomposer.needs_decomposition("Quel est le CA d'Apple ?")
-        # Should be False for simple questions
         assert isinstance(needs, bool)
 
     def test_complex_query_needs_decomposition(self):
@@ -52,11 +50,9 @@ class TestFinancialQueryDecomposer:
         """Test décomposition par règles pour une comparaison."""
         sub_queries = _rule_based_decompose("Comparez Apple et Microsoft sur leurs résultats 2023")
         assert len(sub_queries) >= 2
-        # Should have at least one query per company
         entities_found = set()
         for sq in sub_queries:
             entities_found.update(sq.entities)
-        # Should have found at least one entity
         assert len(entities_found) > 0
 
     def test_extract_entities(self):
@@ -131,13 +127,23 @@ class TestFinancialRAGAgent:
             assert "filename" in src
             assert "score" in src
 
-    def test_deduplication():
+    # FIX CRITIQUE : ajout du paramètre self manquant
+    def test_deduplication(self):
         """Test de la déduplication des résultats."""
         from src.agents.rag_agent import _deduplicate_results
 
-        doc = Document(page_content="Apple CA 383 milliards FY2023", metadata={"source": "a.pdf", "chunk_index": 0})
-        doc_dup = Document(page_content="Apple CA 383 milliards FY2023", metadata={"source": "a.pdf", "chunk_index": 0})
-        doc_other = Document(page_content="Microsoft CA 245 milliards FY2024", metadata={"source": "b.pdf", "chunk_index": 0})
+        doc = Document(
+            page_content="Apple CA 383 milliards FY2023",
+            metadata={"source": "a.pdf", "chunk_index": 0},
+        )
+        doc_dup = Document(
+            page_content="Apple CA 383 milliards FY2023",
+            metadata={"source": "a.pdf", "chunk_index": 0},
+        )
+        doc_other = Document(
+            page_content="Microsoft CA 245 milliards FY2024",
+            metadata={"source": "b.pdf", "chunk_index": 0},
+        )
 
         results = [(doc, 0.9), (doc_dup, 0.85), (doc_other, 0.7)]
         deduped = _deduplicate_results(results)

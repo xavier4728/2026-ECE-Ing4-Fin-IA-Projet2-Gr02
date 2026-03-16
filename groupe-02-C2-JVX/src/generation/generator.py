@@ -44,7 +44,7 @@ class Citation:
 class FinancialAnswer:
     """Réponse financière structurée avec citations et métriques."""
     question: str
-    answer: str                      # Réponse en markdown
+    answer: str
     citations: List[Citation] = field(default_factory=list)
     sub_queries: List[str] = field(default_factory=list)
     confidence_score: float = 0.0
@@ -53,7 +53,6 @@ class FinancialAnswer:
     context_docs_count: int = 0
 
     def to_dict(self) -> dict:
-        """Sérialise la réponse en dict."""
         return {
             "question": self.question,
             "answer": self.answer,
@@ -104,16 +103,6 @@ def _build_context(
     documents: List[Document],
     max_context_chars: int = 8000,
 ) -> str:
-    """
-    Construit le contexte textuel à partir des documents récupérés.
-
-    Args:
-        documents: Documents LangChain récupérés.
-        max_context_chars: Limite de caractères pour le contexte.
-
-    Returns:
-        Contexte formaté pour le prompt.
-    """
     context_parts = []
     total_chars = 0
 
@@ -136,7 +125,6 @@ def _build_context(
         chunk_text = f"{header}\n{doc.page_content}\n"
 
         if total_chars + len(chunk_text) > max_context_chars:
-            # Truncate this chunk
             remaining = max_context_chars - total_chars
             if remaining > 200:
                 chunk_text = chunk_text[:remaining] + "...[tronqué]"
@@ -153,7 +141,6 @@ def _extract_citations(
     documents: List[Document],
     scores: Optional[List[float]] = None,
 ) -> List[Citation]:
-    """Extrait les citations à partir des documents sources."""
     citations = []
     for i, doc in enumerate(documents):
         meta = doc.metadata
@@ -173,27 +160,19 @@ def _extract_citations(
 
 
 def _estimate_confidence(answer: str, citations: List[Citation], n_docs: int) -> float:
-    """Estime la confiance de la réponse (0.0 à 1.0)."""
+    import re
     score = 0.0
 
-    # Has citations
     if citations:
         score += 0.3
     if len(citations) >= 3:
         score += 0.2
-
-    # Has numbers/data
-    import re
     if re.search(r'\d+[\.,]\d+|\d+\s*(?:Md|M|%)', answer):
         score += 0.2
-
-    # Good context coverage
     if n_docs >= 3:
         score += 0.2
     elif n_docs >= 1:
         score += 0.1
-
-    # Doesn't say "not available"
     if "n'est pas disponible" not in answer.lower() and "pas dans le contexte" not in answer.lower():
         score += 0.1
 
@@ -206,10 +185,8 @@ class FinancialAnswerGenerator:
     """
     Générateur de réponses financières via Claude (Anthropic).
 
-    - Prompt système spécialisé analyse financière
-    - Citations vérifiables avec métadonnées complètes
-    - Streaming support
-    - Fallback si API indisponible
+    Fallback automatique si ANTHROPIC_API_KEY est absent :
+    le contexte brut est retourné avec une indication mode dégradé.
     """
 
     def __init__(self) -> None:
@@ -223,7 +200,7 @@ class FinancialAnswerGenerator:
         if not settings.use_anthropic:
             logger.warning(
                 "ANTHROPIC_API_KEY non défini. "
-                "Le générateur fonctionnera en mode dégradé."
+                "Le générateur fonctionnera en mode dégradé (contexte brut)."
             )
             return
 
@@ -245,19 +222,6 @@ class FinancialAnswerGenerator:
         sub_queries: Optional[List[str]] = None,
         max_tokens: int = 2000,
     ) -> FinancialAnswer:
-        """
-        Génère une réponse financière à partir du contexte récupéré.
-
-        Args:
-            question: Question de l'utilisateur.
-            context_documents: Documents de contexte récupérés.
-            context_scores: Scores de pertinence correspondants.
-            sub_queries: Sous-requêtes utilisées si décomposition.
-            max_tokens: Nombre max de tokens pour la réponse.
-
-        Returns:
-            FinancialAnswer avec réponse, citations et métriques.
-        """
         start_time = time.time()
 
         if not context_documents:
@@ -269,11 +233,9 @@ class FinancialAnswerGenerator:
                 processing_time=time.time() - start_time,
             )
 
-        # Build context
         context_text = _build_context(context_documents)
         citations = _extract_citations(context_documents, context_scores)
 
-        # Generate answer
         if self._initialized and self._client:
             answer_text, tokens_used = self._generate_with_anthropic(
                 question=question,
@@ -308,28 +270,22 @@ class FinancialAnswerGenerator:
         """
         Génère une réponse en streaming (token par token).
 
-        Args:
-            question: Question de l'utilisateur.
-            context_documents: Documents de contexte récupérés.
-            context_scores: Scores de pertinence correspondants.
-            max_tokens: Nombre max de tokens.
-
-        Yields:
-            Tokens de la réponse au fur et à mesure.
+        FIX MOYEN :
+        - Suppression de l'import anthropic redondant (le client est déjà initialisé)
+        - Exceptions typées pour distinguer timeout, rate limit et erreurs génériques
         """
         if not context_documents:
             yield "⚠️ Aucun document pertinent trouvé. Veuillez indexer des documents d'abord."
             return
 
         if not self._initialized or not self._client:
-            answer = self._generate_fallback(question, context_documents)
-            yield answer
+            yield self._generate_fallback(question, context_documents)
             return
 
         context_text = _build_context(context_documents)
 
         try:
-            import anthropic
+            # FIX : pas de "import anthropic" ici, le client est déjà self._client
             with self._client.messages.stream(
                 model=self._model,
                 max_tokens=max_tokens,
@@ -348,8 +304,20 @@ class FinancialAnswerGenerator:
                     yield text
 
         except Exception as e:
-            logger.error(f"Erreur streaming: {e}")
-            yield f"\n\n⚠️ Erreur de génération: {e}"
+            # FIX : typage des erreurs Anthropic pour des messages utiles
+            error_type = type(e).__name__
+            if "Timeout" in error_type or "timeout" in str(e).lower():
+                logger.error(f"Timeout streaming après {settings.REQUEST_TIMEOUT}s")
+                yield "\n\n⚠️ Délai dépassé : la génération a pris trop de temps. Réessayez."
+            elif "RateLimit" in error_type or "rate_limit" in str(e).lower():
+                logger.warning("Rate limit Anthropic atteint")
+                yield "\n\n⚠️ Limite de requêtes atteinte. Attendez quelques secondes et réessayez."
+            elif "Authentication" in error_type or "auth" in str(e).lower():
+                logger.error("Erreur d'authentification Anthropic — vérifiez ANTHROPIC_API_KEY")
+                yield "\n\n⚠️ Erreur d'authentification. Vérifiez votre ANTHROPIC_API_KEY dans .env."
+            else:
+                logger.error(f"Erreur streaming: {error_type}: {e}")
+                yield f"\n\n⚠️ Erreur de génération ({error_type}). Voir les logs pour le détail."
 
     def _generate_with_anthropic(
         self,
@@ -357,7 +325,6 @@ class FinancialAnswerGenerator:
         context: str,
         max_tokens: int,
     ) -> tuple[str, int]:
-        """Appel à l'API Anthropic."""
         try:
             response = self._client.messages.create(
                 model=self._model,
@@ -382,12 +349,10 @@ class FinancialAnswerGenerator:
             return self._generate_fallback_from_context(question, context), 0
 
     def _generate_fallback(self, question: str, documents: List[Document]) -> str:
-        """Génération de fallback sans API (extraction directe du contexte)."""
         context = _build_context(documents, max_context_chars=3000)
         return self._generate_fallback_from_context(question, context)
 
     def _generate_fallback_from_context(self, question: str, context: str) -> str:
-        """Retourne le contexte brut structuré quand l'API n'est pas disponible."""
         return (
             f"⚠️ **Mode dégradé** (API Anthropic non configurée)\n\n"
             f"**Question :** {question}\n\n"

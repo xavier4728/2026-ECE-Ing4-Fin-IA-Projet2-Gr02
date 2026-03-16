@@ -19,7 +19,7 @@ from loguru import logger
 
 FINANCIAL_UNITS = re.compile(
     r'(\d[\d\s,\.]+)\s*(M€|Md€|M\$|Md\$|%|bp|K€|K\$|billion|million|trillion)',
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 
@@ -41,8 +41,10 @@ def _df_to_markdown(df: pd.DataFrame, title: str = "") -> str:
         lines.append(f"### {title}")
         lines.append("")
 
-    # Clean cells
-    df = df.applymap(lambda x: _clean_cell(str(x)) if pd.notna(x) else "")
+    # FIX ÉLEVÉ : applymap() supprimé en pandas ≥ 2.1, utiliser map() ou applymap selon version
+    # Compatibilité pandas 2.0 (applymap) ET pandas 2.1+ (map)
+    _apply = df.map if hasattr(df, "map") and callable(getattr(df, "map")) else df.applymap
+    df = _apply(lambda x: _clean_cell(str(x)) if pd.notna(x) else "")
 
     # Header
     headers = [str(col) for col in df.columns]
@@ -62,15 +64,17 @@ def _infer_table_title(page_text: str, table_bbox: Optional[Tuple] = None) -> st
     if not page_text:
         return "Tableau Financier"
 
-    # Look for title-like patterns near tables
     title_patterns = [
-        re.compile(r'((?:Tableau|Table|Compte de résultat|Bilan|Cash[- ]flow|Revenus?|'
-                   r'Résultats?|Performance|Summary|Overview|Ratios?)[^\n]{0,80})', re.I),
+        re.compile(
+            r'((?:Tableau|Table|Compte de résultat|Bilan|Cash[- ]flow|Revenus?|'
+            r'Résultats?|Performance|Summary|Overview|Ratios?)[^\n]{0,80})',
+            re.I,
+        ),
         re.compile(r'^([A-Z][^\n]{10,60})$', re.MULTILINE),
     ]
 
     for pattern in title_patterns:
-        match = pattern.search(page_text[:500])  # Look in first 500 chars
+        match = pattern.search(page_text[:500])
         if match:
             return match.group(1).strip()
 
@@ -98,12 +102,6 @@ class FinancialTableExtractor:
         min_cols: int = 2,
         accuracy_threshold: float = 80.0,
     ) -> None:
-        """
-        Args:
-            min_rows: Nombre minimum de lignes pour valider un tableau.
-            min_cols: Nombre minimum de colonnes pour valider un tableau.
-            accuracy_threshold: Seuil de précision camelot (0-100).
-        """
         self.min_rows = min_rows
         self.min_cols = min_cols
         self.accuracy_threshold = accuracy_threshold
@@ -111,24 +109,16 @@ class FinancialTableExtractor:
     def extract_tables_from_pdf(self, pdf_path: str | Path) -> List[Document]:
         """
         Extrait tous les tableaux d'un PDF et retourne des Documents LangChain.
-
-        Args:
-            pdf_path: Chemin vers le PDF.
-
-        Returns:
-            Liste de Documents LangChain, un par tableau trouvé.
         """
         pdf_path = Path(pdf_path)
         logger.info(f"Extraction tableaux : {pdf_path.name}")
 
         docs: List[Document] = []
 
-        # Try camelot first
         camelot_docs = self._extract_with_camelot(pdf_path)
         if camelot_docs:
             docs.extend(camelot_docs)
         else:
-            # Fallback: pdfplumber
             logger.info(f"Fallback pdfplumber pour {pdf_path.name}")
             docs.extend(self._extract_with_pdfplumber(pdf_path))
 
@@ -163,7 +153,6 @@ class FinancialTableExtractor:
                     if df.shape[0] < self.min_rows or df.shape[1] < self.min_cols:
                         continue
 
-                    # Use first row as header if it looks like one
                     if self._looks_like_header(df.iloc[0].tolist()):
                         df.columns = df.iloc[0]
                         df = df[1:].reset_index(drop=True)
@@ -193,7 +182,7 @@ class FinancialTableExtractor:
                     docs.append(doc)
 
                 if docs:
-                    return docs  # Use first successful flavor
+                    return docs
 
             except Exception as e:
                 logger.debug(f"camelot {flavor} échec: {e}")
@@ -227,9 +216,11 @@ class FinancialTableExtractor:
                             if df.shape[1] < self.min_cols:
                                 continue
 
-                            # Use first row as header
                             if self._looks_like_header(df.iloc[0].tolist()):
-                                df.columns = [str(v) if v else f"Col_{idx}" for idx, v in enumerate(df.iloc[0])]
+                                df.columns = [
+                                    str(v) if v else f"Col_{idx}"
+                                    for idx, v in enumerate(df.iloc[0])
+                                ]
                                 df = df[1:].reset_index(drop=True)
 
                             title = _infer_table_title(page_text)
@@ -271,7 +262,6 @@ class FinancialTableExtractor:
         str_row = [str(c) for c in row if c]
         if not str_row:
             return False
-        # Headers tend to be non-numeric
         numeric_count = sum(1 for c in str_row if re.match(r'^[\d\s,\.\-\(\)]+$', c))
         return numeric_count < len(str_row) * 0.5
 

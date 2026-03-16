@@ -12,7 +12,8 @@ ragas>=0.2.0
 # Document ingestion
 pdfplumber>=0.11.0
 pymupdf>=1.24.0
-camelot-py[cv]>=0.11.0
+camelot-py
+opencv-python
 tabula-py>=2.9.0
 pandas>=2.0.0
 openpyxl>=3.1.0

@@ -21,7 +21,6 @@ class TestHybridFinancialRetriever:
             use_hybrid=False,
         )
         assert isinstance(results, list)
-        # Should return results if vector store is non-empty
         stats = vector_store.get_stats()
         if stats["total_chunks"] > 0:
             assert len(results) > 0
@@ -33,7 +32,6 @@ class TestHybridFinancialRetriever:
             use_hybrid=True,
         )
         assert isinstance(results, list)
-        # Results should be (Document, float) tuples
         for doc, score in results:
             assert isinstance(doc, Document)
             assert isinstance(score, float)
@@ -52,13 +50,23 @@ class TestHybridFinancialRetriever:
         results = retriever.retrieve(query="Apple Microsoft résultats")
         assert len(results) <= 2
 
-    def test_rrf_fusion():
+    # FIX CRITIQUE : ajout du paramètre self manquant
+    def test_rrf_fusion(self):
         """Test de la fusion Reciprocal Rank Fusion."""
         from src.retrieval.retriever import reciprocal_rank_fusion
 
-        doc1 = Document(page_content="Apple CA 383 milliards", metadata={"source": "a.pdf", "chunk_index": 0})
-        doc2 = Document(page_content="Microsoft CA 245 milliards", metadata={"source": "b.pdf", "chunk_index": 0})
-        doc3 = Document(page_content="NVIDIA GPU 3300 milliards", metadata={"source": "c.pdf", "chunk_index": 0})
+        doc1 = Document(
+            page_content="Apple CA 383 milliards",
+            metadata={"source": "a.pdf", "chunk_index": 0},
+        )
+        doc2 = Document(
+            page_content="Microsoft CA 245 milliards",
+            metadata={"source": "b.pdf", "chunk_index": 0},
+        )
+        doc3 = Document(
+            page_content="NVIDIA GPU 3300 milliards",
+            metadata={"source": "c.pdf", "chunk_index": 0},
+        )
 
         list1 = [(doc1, 0.9), (doc2, 0.7), (doc3, 0.5)]
         list2 = [(doc2, 0.85), (doc1, 0.6), (doc3, 0.4)]
@@ -66,7 +74,6 @@ class TestHybridFinancialRetriever:
         fused = reciprocal_rank_fusion([list1, list2], top_n=3)
 
         assert len(fused) <= 3
-        # doc2 should rank high (appeared high in both lists)
         assert any("Microsoft" in doc.page_content for doc, _ in fused)
 
 
@@ -98,15 +105,12 @@ class TestCrossEncoderReRanker:
         pairs = [(sample_documents[0], 0.9)]
         query = "test cache query unique 12345"
 
-        # First call
         _ = reranker.rerank(query, pairs)
         size_after_first = reranker._cache.size
 
-        # Second call (should use cache)
         _ = reranker.rerank(query, pairs)
         size_after_second = reranker._cache.size
 
-        # Cache size should not grow on second call (same key)
         assert size_after_second >= size_after_first
 
 
@@ -135,4 +139,4 @@ class TestFinancialVectorStore:
         assert isinstance(results, list)
         for doc, score in results:
             assert isinstance(doc, Document)
-            assert 0.0 <= score <= 1.0 or score < 0  # Cosine similarity range
+            assert 0.0 <= score <= 1.0 or score < 0

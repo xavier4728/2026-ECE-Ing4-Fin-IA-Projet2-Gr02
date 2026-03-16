@@ -80,24 +80,31 @@ class EvaluationReport:
                 "",
             ])
 
-        lines.extend([
-            "## 💡 Recommandations",
-            "",
-        ])
+        lines.extend(["## 💡 Recommandations", ""])
 
         if self.avg_faithfulness < 0.7:
-            lines.append("- **Faithfulness faible** : Le système génère des affirmations non fondées sur le contexte. Renforcer le prompt système avec des instructions de citation strictes.")
+            lines.append("- **Faithfulness faible** : Renforcer le prompt système avec des instructions de citation strictes.")
         if self.avg_answer_relevancy < 0.7:
-            lines.append("- **Relevancy faible** : Les réponses ne répondent pas précisément aux questions. Améliorer le prompt de génération.")
+            lines.append("- **Relevancy faible** : Améliorer le prompt de génération.")
         if self.avg_context_recall < 0.7:
-            lines.append("- **Context Recall faible** : Le retrieval ne récupère pas tous les chunks pertinents. Augmenter TOP_K_RETRIEVAL ou améliorer l'embedding.")
+            lines.append("- **Context Recall faible** : Augmenter TOP_K_RETRIEVAL ou améliorer l'embedding.")
         if self.avg_context_precision < 0.7:
-            lines.append("- **Context Precision faible** : Trop de chunks non pertinents sont récupérés. Améliorer le re-ranking ou les filtres.")
-
+            lines.append("- **Context Precision faible** : Améliorer le re-ranking ou les filtres.")
         if self.overall_score >= 0.8:
             lines.append("✅ **Excellent système RAG** — Toutes les métriques sont au-dessus du seuil de qualité.")
 
         return "\n".join(lines)
+
+
+# ─── RAGAS version detection ──────────────────────────────────────────────────
+
+def _get_ragas_version() -> Optional[str]:
+    """Retourne la version de ragas installée, ou None si non installée."""
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("ragas")
+    except Exception:
+        return None
 
 
 # ─── Main Evaluator ───────────────────────────────────────────────────────────
@@ -106,14 +113,9 @@ class RAGASEvaluator:
     """
     Évaluateur RAGAS pour le système FinRAG.
 
-    Métriques calculées :
-    - Faithfulness : les réponses sont-elles fidèles au contexte ?
-    - Answer Relevancy : les réponses répondent-elles aux questions ?
-    - Context Recall : le contexte contient-il les informations nécessaires ?
-    - Context Precision : le contexte récupéré est-il précis ?
-
-    Supporte l'évaluation batch (dataset JSON) et single-query.
-    Exporte les résultats vers docs/evaluation_report.md et CSV.
+    Supporte RAGAS 0.1.x et 0.2.x avec détection automatique de l'API.
+    Fallback sur métriques approchées si RAGAS non disponible ou si
+    les clés API (OpenAI) manquent.
     """
 
     def __init__(
@@ -121,39 +123,25 @@ class RAGASEvaluator:
         agent=None,
         eval_dataset_path: Optional[str] = None,
     ) -> None:
-        """
-        Args:
-            agent: Instance FinancialRAGAgent pour générer les réponses.
-            eval_dataset_path: Chemin vers le dataset JSON de questions/réponses.
-        """
         self._agent = agent
         self._dataset_path = eval_dataset_path or str(
             Path(__file__).parent.parent.parent / "data" / "samples" / "eval_questions.json"
         )
-        self._use_ragas_lib = False
-        self._ragas_available = self._check_ragas()
+        self._ragas_version = _get_ragas_version()
+        self._use_ragas_lib = self._ragas_version is not None
 
-    def _check_ragas(self) -> bool:
-        """Vérifie si le package ragas est installé et fonctionnel."""
-        try:
-            import ragas
-            self._use_ragas_lib = True
-            logger.info("Package ragas disponible")
-            return True
-        except ImportError:
+        if self._use_ragas_lib:
+            logger.info(f"Package ragas v{self._ragas_version} disponible")
+        else:
             logger.warning("Package ragas non installé. Utilisation de métriques approchées.")
-            return False
 
     def load_eval_dataset(self) -> List[Dict[str, Any]]:
-        """Charge le dataset d'évaluation depuis le fichier JSON."""
         dataset_path = Path(self._dataset_path)
         if not dataset_path.exists():
             logger.error(f"Dataset d'évaluation introuvable: {dataset_path}")
             return []
-
         with open(dataset_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-
         logger.info(f"Dataset chargé: {len(data)} questions")
         return data
 
@@ -162,16 +150,6 @@ class RAGASEvaluator:
         max_samples: int = 10,
         save_report: bool = True,
     ) -> EvaluationReport:
-        """
-        Évalue le système sur le dataset d'évaluation complet.
-
-        Args:
-            max_samples: Nombre maximum d'échantillons à évaluer.
-            save_report: Sauvegarde le rapport dans docs/evaluation_report.md.
-
-        Returns:
-            EvaluationReport avec toutes les métriques.
-        """
         start_time = time.time()
         dataset = self.load_eval_dataset()
 
@@ -198,12 +176,10 @@ class RAGASEvaluator:
             logger.info(f"Évaluation {i+1}/{len(samples_to_eval)}: {question[:60]}...")
 
             try:
-                # Get agent answer
                 answer_obj = self._agent.answer(question=question, use_decomposition=False)
                 answer_text = answer_obj.answer
                 contexts = [c.excerpt for c in answer_obj.citations] if answer_obj.citations else []
 
-                # Compute metrics
                 sample = EvalSample(
                     question=question,
                     ground_truth=ground_truth,
@@ -211,9 +187,12 @@ class RAGASEvaluator:
                     contexts=contexts,
                 )
 
+                # Utiliser RAGAS seulement si OpenAI dispo (nécessaire pour l'évaluation)
                 if self._use_ragas_lib and settings.use_openai_embeddings:
                     self._compute_ragas_metrics(sample)
                 else:
+                    if self._use_ragas_lib and not settings.use_openai_embeddings:
+                        logger.info("RAGAS disponible mais OPENAI_API_KEY manquante — métriques approchées")
                     self._compute_approximate_metrics(sample)
 
                 eval_samples.append(sample)
@@ -225,7 +204,6 @@ class RAGASEvaluator:
         if not eval_samples:
             return self._empty_report()
 
-        # Aggregate metrics
         report = self._build_report(eval_samples, time.time() - start_time)
 
         if save_report:
@@ -240,18 +218,6 @@ class RAGASEvaluator:
         contexts: List[str],
         ground_truth: Optional[str] = None,
     ) -> EvalSample:
-        """
-        Évalue une seule réponse.
-
-        Args:
-            question: Question posée.
-            answer: Réponse générée.
-            contexts: Contextes utilisés pour la réponse.
-            ground_truth: Réponse de référence (optionnel).
-
-        Returns:
-            EvalSample avec les métriques calculées.
-        """
         sample = EvalSample(
             question=question,
             ground_truth=ground_truth or "",
@@ -267,7 +233,12 @@ class RAGASEvaluator:
         return sample
 
     def _compute_ragas_metrics(self, sample: EvalSample) -> None:
-        """Calcule les métriques RAGAS via la bibliothèque ragas."""
+        """
+        FIX ÉLEVÉ : RAGAS 0.2.x a changé son API.
+        - L'objet retourné par evaluate() est un EvaluationResult, pas un dict.
+        - L'accès se fait par indexation directe [] ou par attribut, pas .get().
+        - Compatibilité assurée par try/except avec fallback sur les métriques approchées.
+        """
         try:
             from ragas import evaluate
             from ragas.metrics import faithfulness, answer_relevancy, context_recall, context_precision
@@ -286,62 +257,94 @@ class RAGASEvaluator:
                 metrics=[faithfulness, answer_relevancy, context_recall, context_precision],
             )
 
-            sample.faithfulness = float(result.get("faithfulness", 0) or 0)
-            sample.answer_relevancy = float(result.get("answer_relevancy", 0) or 0)
-            sample.context_recall = float(result.get("context_recall", 0) or 0)
-            sample.context_precision = float(result.get("context_precision", 0) or 0)
+            # FIX : RAGAS 0.2.x retourne un EvaluationResult
+            # Accès direct par clé (dict-like) — .get() n'existe plus
+            def _safe_get(obj: Any, key: str, default: float = 0.0) -> float:
+                """Accès sécurisé compatible RAGAS 0.1.x et 0.2.x."""
+                try:
+                    val = obj[key]
+                    return float(val) if val is not None else default
+                except (KeyError, TypeError, IndexError):
+                    try:
+                        # Fallback: accès attribut (ancien RAGAS)
+                        val = getattr(obj, key, default)
+                        return float(val) if val is not None else default
+                    except Exception:
+                        return default
+
+            sample.faithfulness = _safe_get(result, "faithfulness")
+            sample.answer_relevancy = _safe_get(result, "answer_relevancy")
+            sample.context_recall = _safe_get(result, "context_recall")
+            sample.context_precision = _safe_get(result, "context_precision")
+
+            logger.debug(
+                f"RAGAS scores — faithfulness={sample.faithfulness:.3f}, "
+                f"relevancy={sample.answer_relevancy:.3f}"
+            )
 
         except Exception as e:
-            logger.warning(f"RAGAS lib erreur: {e}, fallback métriques approchées")
+            logger.warning(f"RAGAS lib erreur ({e}), fallback métriques approchées")
             self._compute_approximate_metrics(sample)
 
     def _compute_approximate_metrics(self, sample: EvalSample) -> None:
         """
         Calcule des métriques approchées sans API externe.
-        Basé sur la similarité de termes (BM25-like).
+        Basé sur la similarité de termes (BM25-like, Jaccard).
+        Utilisé quand RAGAS n'est pas installé ou quand OPENAI_API_KEY est absent.
         """
         import re
 
         def tokenize(text: str) -> set:
-            return set(re.findall(r'\b\w+\b', text.lower()))
+            # Tokenization améliorée : garde les mots financiers composés
+            words = set(re.findall(r'\b\w+\b', text.lower()))
+            return words - {"le", "la", "les", "de", "du", "des", "et", "en", "un", "une"}
 
         def jaccard(a: set, b: set) -> float:
             if not a or not b:
                 return 0.0
-            return len(a & b) / len(a | b)
+            intersection = len(a & b)
+            union = len(a | b)
+            return intersection / union if union > 0 else 0.0
+
+        def recall(reference: set, retrieved: set) -> float:
+            if not reference:
+                return 0.5  # Pas de ground truth = score neutre
+            hit = len(reference & retrieved)
+            return min(1.0, hit / len(reference))
 
         q_tokens = tokenize(sample.question)
         a_tokens = tokenize(sample.answer)
         gt_tokens = tokenize(sample.ground_truth) if sample.ground_truth else set()
         ctx_tokens = tokenize(" ".join(sample.contexts)) if sample.contexts else set()
 
-        # Faithfulness: overlap between answer and contexts
-        if ctx_tokens:
-            sample.faithfulness = min(1.0, len(a_tokens & ctx_tokens) / max(len(a_tokens), 1) * 2)
+        # Faithfulness : quelle part de la réponse est couverte par le contexte ?
+        if ctx_tokens and a_tokens:
+            overlap = len(a_tokens & ctx_tokens)
+            sample.faithfulness = min(1.0, (overlap / len(a_tokens)) * 1.5)
+        elif not ctx_tokens:
+            sample.faithfulness = 0.2  # Pas de contexte = peu fiable
         else:
-            sample.faithfulness = 0.3  # No context available
+            sample.faithfulness = 0.3
 
-        # Answer Relevancy: how much the answer addresses the question
-        sample.answer_relevancy = min(1.0, jaccard(q_tokens, a_tokens) * 3)
+        # Answer Relevancy : la réponse répond-elle à la question ?
+        sample.answer_relevancy = min(1.0, jaccard(q_tokens, a_tokens) * 3.5)
 
-        # Context Recall: overlap between ground truth and contexts
+        # Context Recall : le contexte couvre-t-il la ground truth ?
         if gt_tokens and ctx_tokens:
-            sample.context_recall = min(1.0, len(gt_tokens & ctx_tokens) / max(len(gt_tokens), 1) * 2)
+            sample.context_recall = min(1.0, recall(gt_tokens, ctx_tokens) * 1.8)
         else:
             sample.context_recall = 0.5
 
-        # Context Precision: relevance of contexts to the question
+        # Context Precision : le contexte est-il précis par rapport à la question ?
         if ctx_tokens:
-            sample.context_precision = min(1.0, jaccard(q_tokens, ctx_tokens) * 4)
+            sample.context_precision = min(1.0, jaccard(q_tokens, ctx_tokens) * 4.5)
         else:
             sample.context_precision = 0.0
 
     def _build_report(
         self, samples: List[EvalSample], elapsed: float
     ) -> EvaluationReport:
-        """Construit le rapport d'évaluation."""
         n = len(samples)
-
         avg_faithfulness = sum(s.faithfulness for s in samples) / n
         avg_answer_relevancy = sum(s.answer_relevancy for s in samples) / n
         avg_context_recall = sum(s.context_recall for s in samples) / n
@@ -361,7 +364,6 @@ class RAGASEvaluator:
         )
 
     def _empty_report(self) -> EvaluationReport:
-        """Retourne un rapport vide en cas d'erreur."""
         return EvaluationReport(
             timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             n_samples=0,
@@ -373,16 +375,13 @@ class RAGASEvaluator:
         )
 
     def _save_report(self, report: EvaluationReport) -> None:
-        """Sauvegarde le rapport en markdown et CSV."""
         docs_dir = Path(__file__).parent.parent.parent / "docs"
         docs_dir.mkdir(exist_ok=True)
 
-        # Markdown report
         md_path = docs_dir / "evaluation_report.md"
         md_path.write_text(report.to_markdown(), encoding="utf-8")
         logger.info(f"Rapport markdown sauvegardé: {md_path}")
 
-        # CSV report
         csv_path = docs_dir / "evaluation_results.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=[

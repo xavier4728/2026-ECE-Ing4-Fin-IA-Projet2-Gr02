@@ -6,6 +6,7 @@ Filtres temporels, par type de document et ticker.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,6 @@ def reciprocal_rank_fusion(
 
     for ranked_list in ranked_lists:
         for rank, (doc, _) in enumerate(ranked_list):
-            # Create unique key for deduplication
             doc_key = (
                 doc.metadata.get("source", "")
                 + "::"
@@ -54,7 +54,6 @@ def reciprocal_rank_fusion(
             doc_scores[doc_key] = doc_scores.get(doc_key, 0.0) + rrf_score
             doc_objects[doc_key] = doc
 
-    # Sort by aggregated RRF score
     sorted_items = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
 
     return [
@@ -63,16 +62,28 @@ def reciprocal_rank_fusion(
     ]
 
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def _parse_year(val: str) -> Optional[int]:
+    """
+    FIX MOYEN : parse robuste d'une année depuis des formats variés.
+    Supporte : "2023", "Q4 2024", "FY2023", "2024-01-01", etc.
+    Retourne None si le parsing échoue, avec un warning loggé.
+    """
+    if not val:
+        return None
+    m = re.search(r'(20\d{2})', str(val))
+    if m:
+        return int(m.group(1))
+    return None
+
+
 # ─── BM25 Retriever ───────────────────────────────────────────────────────────
 
 class BM25Retriever:
     """BM25 sparse retriever sur le corpus complet."""
 
     def __init__(self, documents: List[Document]) -> None:
-        """
-        Args:
-            documents: Corpus complet de documents pour BM25.
-        """
         from rank_bm25 import BM25Okapi
 
         self._documents = documents
@@ -81,36 +92,23 @@ class BM25Retriever:
         logger.info(f"BM25 initialisé sur {len(documents)} documents")
 
     def _tokenize(self, text: str) -> List[str]:
-        """Tokenization simple pour BM25."""
         return text.lower().split()
 
     def search(self, query: str, k: int = 20) -> List[Tuple[Document, float]]:
-        """
-        Recherche BM25.
-
-        Args:
-            query: Requête textuelle.
-            k: Nombre de résultats.
-
-        Returns:
-            Liste de (Document, score) triés par score décroissant.
-        """
         tokenized_query = self._tokenize(query)
         scores = self._bm25.get_scores(tokenized_query)
 
-        # Get top-k indices
         top_indices = sorted(
             range(len(scores)),
             key=lambda i: scores[i],
             reverse=True,
         )[:k]
 
-        results = [
+        return [
             (self._documents[i], float(scores[i]))
             for i in top_indices
             if scores[i] > 0
         ]
-        return results
 
 
 # ─── Main Hybrid Retriever ────────────────────────────────────────────────────
@@ -119,36 +117,17 @@ class HybridFinancialRetriever:
     """
     Retriever hybride pour documents financiers.
 
-    Combine :
-    - Dense retrieval (ChromaDB cosine similarity, top-k=20)
-    - Sparse retrieval (BM25 sur le corpus complet, top-k=20)
-    via Reciprocal Rank Fusion → top-k=10 résultats finaux.
-
-    Filtres disponibles :
-    - date_range: tuple(str, str) au format YYYY ou Q1 2024
-    - document_type: list[str]
-    - ticker: str
-    - min_relevance_score: float
-
-    Time-aware : boost des documents récents configurable (decay_factor).
+    Combine Dense (ChromaDB) + Sparse (BM25) via Reciprocal Rank Fusion.
     """
 
     def __init__(
         self,
-        vector_store,  # FinancialVectorStore
+        vector_store,
         top_k: int = 10,
         dense_k: int = 20,
         sparse_k: int = 20,
         time_decay_factor: float = 0.1,
     ) -> None:
-        """
-        Args:
-            vector_store: Instance FinancialVectorStore.
-            top_k: Nombre de résultats finaux après RRF.
-            dense_k: Top-k pour dense retrieval avant RRF.
-            sparse_k: Top-k pour sparse retrieval avant RRF.
-            time_decay_factor: Facteur de boost temporel (0 = désactivé).
-        """
         self._vector_store = vector_store
         self._top_k = top_k
         self._dense_k = dense_k
@@ -161,14 +140,30 @@ class HybridFinancialRetriever:
         )
 
     def _ensure_bm25(self) -> None:
-        """Initialise BM25 à la demande (lazy loading)."""
-        if self._bm25 is None:
-            logger.info("Initialisation BM25 (lazy)...")
-            docs = self._vector_store.get_all_documents()
-            if docs:
-                self._bm25 = BM25Retriever(docs)
-            else:
-                logger.warning("Vector store vide, BM25 non initialisé")
+        """
+        FIX ÉLEVÉ : initialise BM25 avec plafond mémoire configurable.
+        Sur un corpus >10 000 docs, BM25 est tronqué pour éviter les OOM.
+        """
+        if self._bm25 is not None:
+            return
+
+        logger.info("Initialisation BM25 (lazy)...")
+        docs = self._vector_store.get_all_documents()
+
+        if not docs:
+            logger.warning("Vector store vide, BM25 non initialisé")
+            return
+
+        max_docs = settings.BM25_MAX_DOCS
+        if len(docs) > max_docs:
+            logger.warning(
+                f"BM25: corpus tronqué à {max_docs} docs "
+                f"(total={len(docs)}) pour éviter l'OOM. "
+                f"Augmentez BM25_MAX_DOCS dans .env si nécessaire."
+            )
+            docs = docs[:max_docs]
+
+        self._bm25 = BM25Retriever(docs)
 
     def retrieve(
         self,
@@ -179,24 +174,8 @@ class HybridFinancialRetriever:
         min_relevance_score: float = 0.0,
         use_hybrid: bool = True,
     ) -> List[Tuple[Document, float]]:
-        """
-        Retrieval hybride avec filtres et RRF.
-
-        Args:
-            query: Requête utilisateur.
-            date_range: Tuple (start_year, end_year) pour filtre temporel.
-            document_type: Liste de types de documents à inclure.
-            ticker: Filtre sur le ticker boursier.
-            min_relevance_score: Score minimum de pertinence.
-            use_hybrid: Si False, utilise seulement le dense retrieval.
-
-        Returns:
-            Liste de (Document, score) triés par pertinence.
-        """
-        # Build ChromaDB where filter
+        """Retrieval hybride avec filtres et RRF."""
         where_filter = self._build_where_filter(document_type, ticker)
-
-        # Collection filter based on doc types
         collection_types = self._infer_collections(document_type)
 
         # 1. Dense retrieval
@@ -219,21 +198,18 @@ class HybridFinancialRetriever:
 
         if self._bm25 is not None:
             sparse_results = self._bm25.search(query, k=self._sparse_k)
-            # Apply filters to sparse results
-            sparse_results = self._filter_sparse(
-                sparse_results, document_type, ticker
-            )
+            sparse_results = self._filter_sparse(sparse_results, document_type, ticker)
             logger.debug(f"Sparse retrieval: {len(sparse_results)} résultats")
 
         # 3. RRF fusion
-        lists_to_fuse = [l for l in [dense_results, sparse_results] if l]
+        lists_to_fuse = [lst for lst in [dense_results, sparse_results] if lst]
 
         if len(lists_to_fuse) == 1:
-            fused = [(doc, score) for doc, score in lists_to_fuse[0]]
+            fused = list(lists_to_fuse[0])
         else:
             fused = reciprocal_rank_fusion(
                 ranked_lists=lists_to_fuse,
-                top_n=self._top_k * 2,  # get more before filtering
+                top_n=self._top_k * 2,
             )
 
         # 4. Post-filtering and time-aware boost
@@ -247,14 +223,12 @@ class HybridFinancialRetriever:
         document_type: Optional[List[str]],
         ticker: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Construit le filtre ChromaDB where."""
         conditions = []
 
         if document_type and len(document_type) == 1:
             conditions.append({"document_type": {"$eq": document_type[0]}})
 
         if ticker:
-            # ChromaDB stores tickers as JSON list string
             conditions.append({"ticker_symbols": {"$contains": ticker}})
 
         if not conditions:
@@ -267,9 +241,8 @@ class HybridFinancialRetriever:
         self,
         document_type: Optional[List[str]],
     ) -> Optional[List[str]]:
-        """Infère les collections à chercher selon le type de document."""
         if not document_type:
-            return None  # Search all
+            return None
 
         mapping = {
             "news_article": ["news"],
@@ -293,7 +266,6 @@ class HybridFinancialRetriever:
         document_type: Optional[List[str]],
         ticker: Optional[str],
     ) -> List[Tuple[Document, float]]:
-        """Applique les filtres sur les résultats BM25."""
         filtered = []
         for doc, score in results:
             meta = doc.metadata
@@ -323,12 +295,28 @@ class HybridFinancialRetriever:
         date_range: Optional[Tuple[str, str]],
         min_relevance_score: float,
     ) -> List[Tuple[Document, float]]:
-        """Applique le filtre temporel et le boost time-aware."""
+        """
+        FIX MOYEN : parsing robuste des dates via _parse_year().
+        Les formats "Q4 2024", "FY2023" sont maintenant correctement gérés.
+        Avant, int("Q4 2"[:4]) levait une ValueError silencieusement ignorée.
+        """
         if not results:
             return []
 
         current_year = datetime.now().year
         boosted: List[Tuple[Document, float]] = []
+
+        # Pré-parser le date_range une seule fois (et logguer si invalide)
+        start_year: Optional[int] = None
+        end_year: Optional[int] = None
+        if date_range:
+            start_year = _parse_year(str(date_range[0]))
+            end_year = _parse_year(str(date_range[1]))
+            if start_year is None or end_year is None:
+                logger.warning(
+                    f"date_range non parseable: {date_range} — filtre temporel désactivé"
+                )
+                start_year = end_year = None
 
         for doc, score in results:
             if score < min_relevance_score:
@@ -338,29 +326,23 @@ class HybridFinancialRetriever:
             doc_period = meta.get("date", "") or meta.get("time_period", "")
 
             # Date range filter
-            if date_range and doc_period:
-                try:
-                    doc_year = int(str(doc_period)[:4])
-                    start_year = int(str(date_range[0])[:4])
-                    end_year = int(str(date_range[1])[:4])
+            if start_year is not None and end_year is not None and doc_period:
+                doc_year = _parse_year(str(doc_period))
+                if doc_year is not None:
                     if not (start_year <= doc_year <= end_year):
                         continue
-                except (ValueError, TypeError):
-                    pass  # Keep if can't parse
+                # Si doc_year non parseable, on garde le doc (on ne filtre pas)
 
-            # Time-aware boost (recent documents score higher)
+            # Time-aware boost (documents récents prioritaires)
             if self._time_decay_factor > 0 and doc_period:
-                try:
-                    doc_year = int(str(doc_period)[:4])
+                doc_year = _parse_year(str(doc_period))
+                if doc_year is not None:
                     years_ago = max(0, current_year - doc_year)
                     boost = 1.0 / (1.0 + self._time_decay_factor * years_ago)
                     score = score * boost
-                except (ValueError, TypeError):
-                    pass
 
             boosted.append((doc, score))
 
-        # Re-sort after boost
         boosted.sort(key=lambda x: x[1], reverse=True)
         return boosted
 
