@@ -1,5 +1,5 @@
 """
-Générateur de réponses financières avec Claude (Anthropic).
+Générateur de réponses financières avec OpenAI GPT-4o.
 Citations vérifiables, format structuré, streaming support.
 """
 
@@ -31,7 +31,6 @@ class Citation:
     relevance_score: float
 
     def to_markdown(self) -> str:
-        """Formate la citation en markdown inline."""
         parts = [f"**{self.source_file}**"]
         if self.page_number:
             parts.append(f"p.{self.page_number}")
@@ -162,7 +161,6 @@ def _extract_citations(
 def _estimate_confidence(answer: str, citations: List[Citation], n_docs: int) -> float:
     import re
     score = 0.0
-
     if citations:
         score += 0.3
     if len(citations) >= 3:
@@ -175,44 +173,47 @@ def _estimate_confidence(answer: str, citations: List[Citation], n_docs: int) ->
         score += 0.1
     if "n'est pas disponible" not in answer.lower() and "pas dans le contexte" not in answer.lower():
         score += 0.1
-
     return min(1.0, score)
 
 
 # ─── Main Generator ───────────────────────────────────────────────────────────
 
+# Modèle OpenAI utilisé pour la génération
+OPENAI_GENERATION_MODEL = "gpt-4o"
+
+
 class FinancialAnswerGenerator:
     """
-    Générateur de réponses financières via Claude (Anthropic).
+    Générateur de réponses financières via OpenAI GPT-4o.
 
-    Fallback automatique si ANTHROPIC_API_KEY est absent :
-    le contexte brut est retourné avec une indication mode dégradé.
+    Utilise la même clé API (OPENAI_API_KEY) que le pipeline d'embeddings.
+    Fallback automatique si la clé est absente : retourne le contexte brut.
     """
 
     def __init__(self) -> None:
         self._client = None
-        self._model = settings.LLM_MODEL
+        self._model = OPENAI_GENERATION_MODEL
         self._initialized = False
         self._initialize()
 
     def _initialize(self) -> None:
-        """Initialise le client Anthropic."""
-        if not settings.use_anthropic:
+        """Initialise le client OpenAI."""
+        if not settings.use_openai_embeddings:
             logger.warning(
-                "ANTHROPIC_API_KEY non défini. "
+                "OPENAI_API_KEY non défini. "
                 "Le générateur fonctionnera en mode dégradé (contexte brut)."
             )
             return
 
         try:
-            import anthropic
-            self._client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            from openai import OpenAI
+            self._client = OpenAI(api_key=settings.OPENAI_API_KEY)
             self._initialized = True
-            logger.info(f"Générateur Anthropic initialisé : {self._model}")
+            logger.info(f"Générateur OpenAI initialisé : {self._model}")
         except ImportError:
-            logger.error("Package 'anthropic' non installé. pip install anthropic")
+            logger.error("Package 'openai' non installé. pip install openai")
         except Exception as e:
-            logger.error(f"Erreur initialisation Anthropic: {e}")
+            logger.error(f"Erreur initialisation OpenAI: {e}")
 
     def generate(
         self,
@@ -222,6 +223,7 @@ class FinancialAnswerGenerator:
         sub_queries: Optional[List[str]] = None,
         max_tokens: int = 2000,
     ) -> FinancialAnswer:
+        """Génère une réponse financière à partir du contexte récupéré."""
         start_time = time.time()
 
         if not context_documents:
@@ -237,7 +239,7 @@ class FinancialAnswerGenerator:
         citations = _extract_citations(context_documents, context_scores)
 
         if self._initialized and self._client:
-            answer_text, tokens_used = self._generate_with_anthropic(
+            answer_text, tokens_used = self._generate_with_openai(
                 question=question,
                 context=context_text,
                 max_tokens=max_tokens,
@@ -267,13 +269,7 @@ class FinancialAnswerGenerator:
         context_scores: Optional[List[float]] = None,
         max_tokens: int = 2000,
     ) -> Iterator[str]:
-        """
-        Génère une réponse en streaming (token par token).
-
-        FIX MOYEN :
-        - Suppression de l'import anthropic redondant (le client est déjà initialisé)
-        - Exceptions typées pour distinguer timeout, rate limit et erreurs génériques
-        """
+        """Génère une réponse en streaming (token par token)."""
         if not context_documents:
             yield "⚠️ Aucun document pertinent trouvé. Veuillez indexer des documents d'abord."
             return
@@ -283,69 +279,74 @@ class FinancialAnswerGenerator:
             return
 
         context_text = _build_context(context_documents)
+        user_content = (
+            f"**Contexte documentaire :**\n\n{context_text}\n\n"
+            f"---\n\n**Question :** {question}"
+        )
 
         try:
-            # FIX : pas de "import anthropic" ici, le client est déjà self._client
-            with self._client.messages.stream(
+            stream = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=max_tokens,
-                system=SYSTEM_PROMPT,
                 messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"**Contexte documentaire :**\n\n{context_text}\n\n"
-                            f"---\n\n**Question :** {question}"
-                        ),
-                    }
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
                 ],
-            ) as stream:
-                for text in stream.text_stream:
-                    yield text
+                stream=True,
+            )
+            for chunk in stream:
+                delta_content = chunk.choices[0].delta.content
+                if delta_content:
+                    yield delta_content
 
         except Exception as e:
-            # FIX : typage des erreurs Anthropic pour des messages utiles
             error_type = type(e).__name__
-            if "Timeout" in error_type or "timeout" in str(e).lower():
-                logger.error(f"Timeout streaming après {settings.REQUEST_TIMEOUT}s")
+            error_str = str(e).lower()
+
+            if "timeout" in error_str or "Timeout" in error_type:
+                logger.error(f"Timeout streaming OpenAI après {settings.REQUEST_TIMEOUT}s")
                 yield "\n\n⚠️ Délai dépassé : la génération a pris trop de temps. Réessayez."
-            elif "RateLimit" in error_type or "rate_limit" in str(e).lower():
-                logger.warning("Rate limit Anthropic atteint")
+            elif "ratelimit" in error_str or "rate_limit" in error_str or "RateLimit" in error_type:
+                logger.warning("Rate limit OpenAI atteint")
                 yield "\n\n⚠️ Limite de requêtes atteinte. Attendez quelques secondes et réessayez."
-            elif "Authentication" in error_type or "auth" in str(e).lower():
-                logger.error("Erreur d'authentification Anthropic — vérifiez ANTHROPIC_API_KEY")
-                yield "\n\n⚠️ Erreur d'authentification. Vérifiez votre ANTHROPIC_API_KEY dans .env."
+            elif "auth" in error_str or "Authentication" in error_type or "Unauthorized" in error_type:
+                logger.error("Erreur d'authentification OpenAI — vérifiez OPENAI_API_KEY")
+                yield "\n\n⚠️ Erreur d'authentification. Vérifiez votre OPENAI_API_KEY dans .env."
+            elif "insufficient_quota" in error_str:
+                logger.error("Quota OpenAI insuffisant")
+                yield "\n\n⚠️ Quota OpenAI insuffisant. Vérifiez votre facturation sur platform.openai.com."
             else:
-                logger.error(f"Erreur streaming: {error_type}: {e}")
+                logger.error(f"Erreur streaming OpenAI: {error_type}: {e}")
                 yield f"\n\n⚠️ Erreur de génération ({error_type}). Voir les logs pour le détail."
 
-    def _generate_with_anthropic(
+    def _generate_with_openai(
         self,
         question: str,
         context: str,
         max_tokens: int,
     ) -> tuple[str, int]:
+        """Appel synchrone à l'API OpenAI Chat Completions."""
         try:
-            response = self._client.messages.create(
+            response = self._client.chat.completions.create(
                 model=self._model,
                 max_tokens=max_tokens,
-                system=SYSTEM_PROMPT,
                 messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
                         "content": (
                             f"**Contexte documentaire :**\n\n{context}\n\n"
                             f"---\n\n**Question :** {question}"
                         ),
-                    }
+                    },
                 ],
             )
-            answer = response.content[0].text
-            tokens = response.usage.input_tokens + response.usage.output_tokens
+            answer = response.choices[0].message.content or ""
+            tokens = response.usage.total_tokens if response.usage else 0
             return answer, tokens
 
         except Exception as e:
-            logger.error(f"Erreur API Anthropic: {e}")
+            logger.error(f"Erreur API OpenAI: {e}")
             return self._generate_fallback_from_context(question, context), 0
 
     def _generate_fallback(self, question: str, documents: List[Document]) -> str:
@@ -354,8 +355,8 @@ class FinancialAnswerGenerator:
 
     def _generate_fallback_from_context(self, question: str, context: str) -> str:
         return (
-            f"⚠️ **Mode dégradé** (API Anthropic non configurée)\n\n"
+            f"⚠️ **Mode dégradé** (OPENAI_API_KEY non configurée)\n\n"
             f"**Question :** {question}\n\n"
             f"**Contexte disponible :**\n\n{context[:2000]}\n\n"
-            "*Configurez ANTHROPIC_API_KEY dans votre fichier .env pour obtenir une réponse analysée.*"
+            "*Configurez OPENAI_API_KEY dans votre fichier .env pour obtenir une réponse analysée.*"
         )
