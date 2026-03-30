@@ -2,11 +2,9 @@
 
 > Système de Retrieval-Augmented Generation de niveau production pour l'analyse de documents financiers complexes. Développé dans le cadre du projet ECE Ing4 IA Finance — Groupe 02-C2-JVX.
 
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
-[![LangChain](https://img.shields.io/badge/LangChain-0.3+-green.svg)](https://langchain.com)
-[![ChromaDB](https://img.shields.io/badge/ChromaDB-0.5+-purple.svg)](https://chromadb.com)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-red.svg)](https://streamlit.io)
-[![License](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+## Diapositive 
+
+https://docs.google.com/presentation/d/1ZHgFnpXF54FMbHQaADr3LEy9rIQ4NFkfQzFusvhMNZk/edit?usp=sharing
 
 ---
 
